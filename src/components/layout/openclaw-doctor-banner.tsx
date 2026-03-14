@@ -2,6 +2,11 @@
 
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import {
+  isOpenClawDoctorCacheFresh,
+  parseOpenClawDoctorCache,
+  serializeOpenClawDoctorCache,
+} from '@/lib/openclaw-doctor-banner-cache'
 
 interface OpenClawDoctorStatus {
   level: 'healthy' | 'warning' | 'error'
@@ -20,6 +25,59 @@ interface OpenClawDoctorFixProgress {
 
 type BannerState = 'idle' | 'fixing' | 'success' | 'error'
 
+const OPENCLAW_DOCTOR_CACHE_KEY = 'mc.openclaw.doctor.status.v1'
+const OPENCLAW_DOCTOR_COOLDOWN_MS = 10 * 60 * 1000
+let pendingDoctorStatusRequest: Promise<OpenClawDoctorStatus | null> | null = null
+
+/**
+ * Read cached doctor status from session storage when available.
+ */
+function readCachedDoctorStatus(): OpenClawDoctorStatus | null {
+  if (typeof window === 'undefined') return null
+  const cached = parseOpenClawDoctorCache<OpenClawDoctorStatus>(
+    window.sessionStorage.getItem(OPENCLAW_DOCTOR_CACHE_KEY),
+  )
+  if (!cached) return null
+  if (!isOpenClawDoctorCacheFresh(cached.fetchedAt, Date.now(), OPENCLAW_DOCTOR_COOLDOWN_MS)) return null
+  return cached.status
+}
+
+/**
+ * Persist doctor status in session storage with timestamp.
+ */
+function writeCachedDoctorStatus(status: OpenClawDoctorStatus): void {
+  if (typeof window === 'undefined') return
+  window.sessionStorage.setItem(
+    OPENCLAW_DOCTOR_CACHE_KEY,
+    serializeOpenClawDoctorCache({ status, fetchedAt: Date.now() }),
+  )
+}
+
+/**
+ * Fetch doctor status once at a time and reuse result during cooldown.
+ */
+async function fetchDoctorStatusOnce(): Promise<OpenClawDoctorStatus | null> {
+  const cached = readCachedDoctorStatus()
+  if (cached) return cached
+  if (pendingDoctorStatusRequest) return pendingDoctorStatusRequest
+
+  pendingDoctorStatusRequest = (async () => {
+    try {
+      const res = await fetch('/api/openclaw/doctor', { cache: 'no-store' })
+      if (!res.ok) return null
+      const data = await res.json() as OpenClawDoctorStatus
+      writeCachedDoctorStatus(data)
+      return data
+    } catch {
+      return null
+    } finally {
+      pendingDoctorStatusRequest = null
+    }
+  })()
+
+  return pendingDoctorStatusRequest
+}
+
 export function OpenClawDoctorBanner() {
   const [doctor, setDoctor] = useState<OpenClawDoctorStatus | null>(null)
   const [loading, setLoading] = useState(true)
@@ -31,12 +89,11 @@ export function OpenClawDoctorBanner() {
 
   async function loadDoctorStatus() {
     try {
-      const res = await fetch('/api/openclaw/doctor', { cache: 'no-store' })
-      if (!res.ok) {
+      const data = await fetchDoctorStatusOnce()
+      if (!data) {
         setDoctor(null)
         return
       }
-      const data = await res.json()
       setDoctor(data)
       setDismissed(false)
     } catch {
@@ -83,6 +140,9 @@ export function OpenClawDoctorBanner() {
       }
 
       setDoctor(data.status)
+      if (data.status) {
+        writeCachedDoctorStatus(data.status as OpenClawDoctorStatus)
+      }
       const progress = Array.isArray(data.progress) ? data.progress as OpenClawDoctorFixProgress[] : []
       setFixProgress(progress.map(item => item.detail).filter(Boolean).join(' '))
       setState(data.status?.healthy ? 'success' : 'idle')
