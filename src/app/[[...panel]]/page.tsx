@@ -385,7 +385,7 @@ export default function Home() {
             <LocalModeBanner />
             <UpdateBanner />
             <OpenClawUpdateBanner />
-            <OpenClawDoctorBanner />
+            {activeTab === 'overview' && <OpenClawDoctorBanner />}
           </>
         )}
         <main
